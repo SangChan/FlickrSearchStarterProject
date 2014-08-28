@@ -11,6 +11,9 @@
 #import "RWTFlickrPhoto.h"
 #import <objectiveflickr/ObjectiveFlickr.h>
 #import <LinqToObjectiveC/NSArray+LinqExtensions.h>
+#import "RWTFlickrPhotoMetadata.h"
+#import <ReactiveCocoa/ReactiveCocoa.h>
+#import <ReactiveCocoa/RACEXTScope.h>
 
 @interface RWTFlickrSearchImpl () <OFFlickrAPIRequestDelegate>
 
@@ -40,6 +43,26 @@
     }];
 }
 
+- (RACSignal *)flickrImageMetadata:(NSString *)photoId
+{
+    RACSignal *favorite = [self signalFromAPIMethod:@"flickr.photos.getFavorites" arguments:@{@"photo_id":photoId} transform:^id(NSDictionary *response) {
+        NSString *total = [response valueForKeyPath:@"photo.total"];
+        return total;
+    }];
+    
+    RACSignal *comments = [self signalFromAPIMethod:@"flickr.photos.getInfo" arguments:@{@"photo_id":photoId} transform:^id(NSDictionary *response) {
+        NSString *total = [response valueForKeyPath:@"photo.comments._text"];
+        return total;
+    }];
+    
+    return [RACSignal combineLatest:@[favorite, comments] reduce:^id(NSString *favs, NSString *coms){
+        RWTFlickrPhotoMetadata *meta = [RWTFlickrPhotoMetadata new];
+        meta.comments = [coms integerValue];
+        meta.favorites = [coms integerValue];
+        return meta;
+    }];
+}
+
 - (instancetype)init
 {
     self = [super init];
@@ -61,12 +84,26 @@
         
         RACSignal *successSignal = [self rac_signalForSelector:@selector(flickrAPIRequest:didCompleteWithResponse:) fromProtocol:@protocol(OFFlickrAPIRequestDelegate)];
         
-        [[[successSignal map:^id(RACTuple *tuple) {
-            return tuple.second;
-        }] map:block]
+        @weakify(flickrRequest)
+        [[[[successSignal
+            filter:^BOOL(RACTuple *tuple) {
+                @strongify(flickrRequest)
+                return tuple.first == flickrRequest;
+            }]
+           map:^id(RACTuple *tuple) {
+               return tuple.second;
+           }]
+          map:block]
          subscribeNext:^(id x) {
-            [subscriber sendNext:x];
-            [subscriber sendCompleted];
+             [subscriber sendNext:x];
+             [subscriber sendCompleted];
+         }];
+
+        
+        RACSignal *errorSignal = [self rac_signalForSelector:@selector(flickrAPIRequest:didFailWithError:) fromProtocol:@protocol(OFFlickrAPIRequestDelegate)];
+        
+        [errorSignal subscribeNext:^(RACTuple *tuple) {
+            [subscriber sendError:tuple.second];
         }];
         
         [flickrRequest callAPIMethodWithGET:method arguments:args];
